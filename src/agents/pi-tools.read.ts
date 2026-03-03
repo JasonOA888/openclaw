@@ -13,7 +13,11 @@ import { detectMime } from "../media/mime.js";
 import { sniffMimeFromBase64 } from "../media/sniff-mime-from-base64.js";
 import type { ImageSanitizationLimits } from "./image-sanitization.js";
 import { toRelativeWorkspacePath } from "./path-policy.js";
-import { wrapHostEditToolWithPostWriteRecovery } from "./pi-tools.host-edit.js";
+import {
+  wrapHostEditToolWithPostWriteRecovery,
+  wrapHostEditToolWithMismatchContent,
+  wrapSandboxedEditToolWithMismatchContent,
+} from "./pi-tools.host-edit.js";
 import {
   CLAUDE_PARAM_GROUPS,
   assertRequiredParams,
@@ -462,7 +466,12 @@ export function createSandboxedEditTool(params: SandboxToolParams) {
   const base = createEditTool(params.root, {
     operations: createSandboxEditOperations(params),
   }) as unknown as AnyAgentTool;
-  return wrapToolParamNormalization(base, CLAUDE_PARAM_GROUPS.edit);
+  const withMismatchContent = wrapSandboxedEditToolWithMismatchContent(
+    base,
+    params.bridge,
+    params.root,
+  );
+  return wrapToolParamNormalization(withMismatchContent, CLAUDE_PARAM_GROUPS.edit);
 }
 
 export function createHostWorkspaceWriteTool(root: string, options?: { workspaceOnly?: boolean }) {
@@ -477,7 +486,8 @@ export function createHostWorkspaceEditTool(root: string, options?: { workspaceO
     operations: createHostEditOperations(root, options),
   }) as unknown as AnyAgentTool;
   const withRecovery = wrapHostEditToolWithPostWriteRecovery(base, root);
-  return wrapToolParamNormalization(withRecovery, CLAUDE_PARAM_GROUPS.edit);
+  const withMismatchContent = wrapHostEditToolWithMismatchContent(withRecovery, root, options);
+  return wrapToolParamNormalization(withMismatchContent, CLAUDE_PARAM_GROUPS.edit);
 }
 
 export function createOpenClawReadTool(

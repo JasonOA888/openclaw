@@ -14,6 +14,70 @@ function resolveHostEditPath(root: string, pathParam: string): string {
 }
 
 /**
+ * Wraps the host edit tool to return the current file content on mismatch.
+ * Implements Option 1 from https://github.com/openclaw/openclaw/issues/18132
+ */
+export function wrapHostEditToolWithMismatchContent(
+  base: AnyAgentTool,
+  root: string,
+  _options?: { workspaceOnly?: boolean },
+): AnyAgentTool {
+  return {
+    ...base,
+    execute: async (
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal | undefined,
+      onUpdate?: AgentToolUpdateCallback<unknown>,
+    ) => {
+      const result = await base.execute(toolCallId, params, signal, onUpdate);
+
+      // Check if edit failed due to oldText mismatch (specific error from pi-coding-agent)
+      if (
+        result.isError &&
+        result.content.some((block) => {
+          if (block.type === "text") {
+            const text = block.text.toLowerCase();
+            // Only match specific oldText mismatch errors from createEditTool
+            return text.includes("oldtext") && text.includes("not found");
+          }
+          return false;
+        })
+      ) {
+        // Try to read current file content and append it to the error
+        const record =
+          params && typeof params === "object" ? (params as Record<string, unknown>) : undefined;
+        const filePath = record?.file_path || record?.path;
+
+        if (typeof filePath === "string") {
+          try {
+            const absolutePath = resolveHostEditPath(root, filePath);
+            const content = await fs.readFile(absolutePath, "utf-8");
+
+            // Append current content to error message
+            return {
+              ...result,
+              content: [
+                ...result.content,
+                {
+                  type: "text" as const,
+                  text: `\n\n--- Current file content ---\n${content}\n--- End of current content ---`,
+                },
+              ],
+            };
+          } catch {
+            // If we can't read the file, just return the original error
+            return result;
+          }
+        }
+      }
+
+      return result;
+    },
+  };
+}
+
+/**
  * When the upstream edit tool throws after having already written (e.g. generateDiffString fails),
  * the file may be correctly updated but the tool reports failure. This wrapper catches errors and
  * if the target file on disk contains the intended newText, returns success so we don't surface
@@ -77,6 +141,66 @@ export function wrapHostEditToolWithPostWriteRecovery(
         }
         throw err;
       }
+    },
+  };
+}
+
+/**
+ * Wraps the sandboxed edit tool to return the current file content on mismatch.
+ * Implements Option 1 from https://github.com/openclaw/openclaw/issues/18132
+ */
+export function wrapSandboxedEditToolWithMismatchContent(
+  base: AnyAgentTool,
+  bridge: { readFile: (opts: { filePath: string; cwd: string }) => Promise<Buffer> },
+  root: string,
+): AnyAgentTool {
+  return {
+    ...base,
+    execute: async (
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal | undefined,
+      onUpdate?: AgentToolUpdateCallback<unknown>,
+    ) => {
+      const result = await base.execute(toolCallId, params, signal, onUpdate);
+
+      // Check if edit failed due to oldText mismatch
+      if (
+        result.isError &&
+        result.content.some((block) => {
+          if (block.type === "text") {
+            const text = block.text.toLowerCase();
+            return text.includes("oldtext") && text.includes("not found");
+          }
+          return false;
+        })
+      ) {
+        const record =
+          params && typeof params === "object" ? (params as Record<string, unknown>) : undefined;
+        const filePath = record?.file_path || record?.path;
+
+        if (typeof filePath === "string") {
+          try {
+            const content = await bridge.readFile({ filePath, cwd: root });
+            const currentContent = Buffer.from(content).toString("utf-8");
+
+            return {
+              ...result,
+              content: [
+                ...result.content,
+                {
+                  type: "text" as const,
+                  text: `\n\n--- Current file content ---\n${currentContent}\n--- End of current content ---`,
+                },
+              ],
+            };
+          } catch {
+            return result;
+          }
+        }
+      }
+
+      return result;
     },
   };
 }
